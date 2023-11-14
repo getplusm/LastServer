@@ -3,16 +3,13 @@ package t.me.p1azmer.plugin.last_server;
 import com.google.inject.Inject;
 import com.j256.ormlite.dao.Dao;
 import com.j256.ormlite.dao.DaoManager;
-import com.j256.ormlite.dao.GenericRawResults;
-import com.j256.ormlite.db.DatabaseType;
-import com.j256.ormlite.field.FieldType;
 import com.j256.ormlite.stmt.UpdateBuilder;
 import com.j256.ormlite.support.ConnectionSource;
-import com.j256.ormlite.table.TableInfo;
 import com.j256.ormlite.table.TableUtils;
 import com.velocitypowered.api.event.EventManager;
 import com.velocitypowered.api.event.Subscribe;
 import com.velocitypowered.api.event.proxy.ProxyInitializeEvent;
+import com.velocitypowered.api.plugin.Dependency;
 import com.velocitypowered.api.plugin.Plugin;
 import com.velocitypowered.api.plugin.annotation.DataDirectory;
 import com.velocitypowered.api.proxy.Player;
@@ -27,6 +24,7 @@ import t.me.p1azmer.plugin.last_server.data.SQLRuntimeException;
 import t.me.p1azmer.plugin.last_server.data.UserData;
 import t.me.p1azmer.plugin.last_server.dependencies.DatabaseLibrary;
 import t.me.p1azmer.plugin.last_server.listener.JoinListener;
+import t.me.p1azmer.plugin.last_server.listener.integration.LimboAuthListener;
 
 import javax.management.ReflectionException;
 import java.io.File;
@@ -34,7 +32,9 @@ import java.io.IOException;
 import java.net.URISyntaxException;
 import java.nio.file.Path;
 import java.sql.SQLException;
-import java.util.*;
+import java.util.Comparator;
+import java.util.List;
+import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -44,7 +44,10 @@ import java.util.concurrent.atomic.AtomicBoolean;
         url = "t.me/p1azmer",
         authors = "plazmer",
         description = "Saving last server when player quit and reconnect when join",
-        version = BuildConstants.VERSION
+        version = BuildConstants.VERSION,
+        dependencies = {
+                @Dependency(id = "limboauth", optional = true)
+        }
 )
 public class LastServerPlugin {
     private Dao<UserData, String> playerDao;
@@ -112,103 +115,8 @@ public class LastServerPlugin {
         EventManager eventManager = this.server.getEventManager();
         eventManager.unregisterListeners(this);
         eventManager.register(this, new JoinListener(this, this.playerDao));
-    }
-
-    public void migrateDb(Dao<?, ?> dao) {
-        TableInfo<?, ?> tableInfo = dao.getTableInfo();
-
-        Set<FieldType> tables = new HashSet<>();
-        Collections.addAll(tables, tableInfo.getFieldTypes());
-
-        String findSql;
-        String database = Config.IMP.DATABASE.DATABASE;
-        String tableName = tableInfo.getTableName();
-        DatabaseLibrary databaseLibrary = Config.IMP.DATABASE.STORAGE_TYPE;
-        switch (databaseLibrary) {
-            case SQLITE: {
-                findSql = "SELECT name FROM PRAGMA_TABLE_INFO('" + tableName + "')";
-                break;
-            }
-            case H2: {
-                findSql = "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = '" + tableName + "';";
-                break;
-            }
-            case POSTGRESQL: {
-                findSql = "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_CATALOG = '" + database + "' AND TABLE_NAME = '" + tableName + "';";
-                break;
-            }
-            case MARIADB:
-            case MYSQL: {
-                findSql = "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = '" + database + "' AND TABLE_NAME = '" + tableName + "';";
-                break;
-            }
-            default: {
-                this.getLogger().error("WRONG DATABASE TYPE.");
-                this.server.shutdown();
-                return;
-            }
-        }
-
-        // Проверяем, существует ли столбец "LAST_SERVER"
-        boolean lastServerColumnExists = false;
-        for (FieldType fieldType : tableInfo.getFieldTypes()) {
-            if (fieldType.getColumnName().equalsIgnoreCase(UserData.COL_LAST_SERVER)) {
-                lastServerColumnExists = true;
-                break;
-            }
-        }
-
-        if (!lastServerColumnExists) {
-            // Столбца "LAST_SERVER" нет, добавляем его
-            try {
-                StringBuilder builder = new StringBuilder("ALTER TABLE ");
-                if (databaseLibrary == DatabaseLibrary.POSTGRESQL) {
-                    builder.append('"');
-                }
-                builder.append(tableName);
-                if (databaseLibrary == DatabaseLibrary.POSTGRESQL) {
-                    builder.append('"');
-                }
-                builder.append(" ADD ");
-                builder.append(UserData.COL_LAST_SERVER).append(" VARCHAR(255)");
-                dao.executeRawNoArgs(builder.toString());
-            } catch (SQLException e) {
-                throw new SQLRuntimeException(e);
-            }
-        }
-
-        try (GenericRawResults<String[]> queryResult = dao.queryRaw(findSql)) {
-            queryResult.forEach(result -> tables.removeIf(table -> table.getColumnName().equalsIgnoreCase(result[0])));
-
-            tables.forEach(table -> {
-                try {
-                    StringBuilder builder = new StringBuilder("ALTER TABLE ");
-                    if (databaseLibrary == DatabaseLibrary.POSTGRESQL) {
-                        builder.append('"');
-                    }
-                    builder.append(tableName);
-                    if (databaseLibrary == DatabaseLibrary.POSTGRESQL) {
-                        builder.append('"');
-                    }
-                    builder.append(" ADD ");
-                    String columnDefinition = table.getColumnDefinition();
-                    DatabaseType databaseType = dao.getConnectionSource().getDatabaseType();
-                    if (columnDefinition == null) {
-                        List<String> dummy = List.of();
-                        databaseType.appendColumnArg(table.getTableName(), builder, table, dummy, dummy, dummy, dummy);
-                    } else {
-                        databaseType.appendEscapedEntityName(builder, table.getColumnName());
-                        builder.append(" ").append(columnDefinition).append(" ");
-                    }
-
-                    dao.executeRawNoArgs(builder.toString());
-                } catch (SQLException e) {
-                    throw new SQLRuntimeException(e);
-                }
-            });
-        } catch (Exception e) {
-            throw new SQLRuntimeException(e);
-        }
+        if (this.server.getPluginManager().getPlugin("limboauth").isPresent())
+            eventManager.register(this, new LimboAuthListener(this, this.playerDao));
     }
 
     public void initialPlayer(@NotNull Player player) {
